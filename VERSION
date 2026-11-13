@@ -1,0 +1,5 @@
+# VERSION — forge-gate (Tier 4: The Gate)
+# Function: the current release version of this consumer. Advances only on freeze.
+# 1.0.0 — The Gate frozen. Tests pass (12/12).
+
+1.0.0
