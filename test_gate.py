@@ -112,7 +112,7 @@ def test_health_requires_token(test_gate_server):
 # ── Server: push ───────────────────────────────────────────────────────
 def test_push_valid_genesis(test_gate_server, key):
     url, ledger_path = test_gate_server
-    genesis = _make_entry(0, "0" * 64, {"data": "first"}, key)
+    genesis = _make_entry(0, [], {"data": "first"}, key)
     body = json.dumps({"entries": [genesis]}).encode()
     req = urllib.request.Request(
         url + "/push", data=body, method="POST",
@@ -132,7 +132,7 @@ def test_push_valid_genesis(test_gate_server, key):
 
 def test_push_requires_token(test_gate_server, key):
     url, _ = test_gate_server
-    genesis = _make_entry(0, "0" * 64, {"data": "first"}, key)
+    genesis = _make_entry(0, [], {"data": "first"}, key)
     body = json.dumps({"entries": [genesis]}).encode()
     req = urllib.request.Request(url + "/push", data=body, method="POST")
     with pytest.raises(urllib.error.HTTPError) as exc:
@@ -142,7 +142,7 @@ def test_push_requires_token(test_gate_server, key):
 
 def test_push_wrong_prev_is_409(test_gate_server, key):
     url, _ = test_gate_server
-    bad = _make_entry(0, "f" * 64, {"data": "first"}, key)
+    bad = _make_entry(0, ["f" * 64], {"data": "first"}, key)
     body = json.dumps({"entries": [bad]}).encode()
     req = urllib.request.Request(
         url + "/push", data=body, method="POST",
@@ -152,38 +152,35 @@ def test_push_wrong_prev_is_409(test_gate_server, key):
         urllib.request.urlopen(req)
     assert exc.value.code == 409
     err = json.loads(exc.value.read())
-    assert err["error"] == "chain_mismatch"
-    assert err["expected_prev"] == "0" * 64
-    assert err["expected_seq"] == 0
+    assert err["error"] == "missing_parents"
 
 
-def test_push_wrong_seq_is_409(test_gate_server, key):
+def test_push_skipped_seq_is_accepted_in_dag(test_gate_server, key):
+    # DAG mode: gaps in seq are allowed. A device can push seq 2 whose
+    # parent (seq 0) is already in the ledger. seq 1 might arrive later
+    # from another device.
     url, ledger_path = test_gate_server
-    genesis = _make_entry(0, "0" * 64, {"data": "first"}, key)
+    genesis = _make_entry(0, [], {"data": "first"}, key)
     body = json.dumps({"entries": [genesis]}).encode()
-    req = urllib.request.Request(
+    urllib.request.urlopen(urllib.request.Request(
         url + "/push", data=body, method="POST",
         headers={"Authorization": "Bearer test-token", "Content-Type": "application/json"},
-    )
-    urllib.request.urlopen(req)
+    ))
 
-    skipped = _make_entry(2, genesis["hash"], {"data": "third"}, key)
+    skipped = _make_entry(2, [genesis["hash"]], {"data": "third"}, key)
     body2 = json.dumps({"entries": [skipped]}).encode()
-    req2 = urllib.request.Request(
+    resp = urllib.request.urlopen(urllib.request.Request(
         url + "/push", data=body2, method="POST",
         headers={"Authorization": "Bearer test-token", "Content-Type": "application/json"},
-    )
-    with pytest.raises(urllib.error.HTTPError) as exc:
-        urllib.request.urlopen(req2)
-    assert exc.value.code == 409
-    err = json.loads(exc.value.read())
-    assert err["expected_seq"] == 1
+    ))
+    assert resp.status == 200
+    assert json.loads(resp.read())["accepted"] == 1
 
 
 def test_push_chain_is_atomic(test_gate_server, key):
     url, _ = test_gate_server
-    e0 = _make_entry(0, "0" * 64, {"data": "first"}, key)
-    e2 = _make_entry(2, e0["hash"], {"data": "third"}, key)  # wrong seq
+    e0 = _make_entry(0, [], {"data": "first"}, key)
+    e2 = _make_entry(2, ["f" * 64], {"data": "third"}, key)  # orphan parent
     body = json.dumps({"entries": [e0, e2]}).encode()
     req = urllib.request.Request(
         url + "/push", data=body, method="POST",
@@ -192,6 +189,8 @@ def test_push_chain_is_atomic(test_gate_server, key):
     with pytest.raises(urllib.error.HTTPError) as exc:
         urllib.request.urlopen(req)
     assert exc.value.code == 409
+    err = json.loads(exc.value.read())
+    assert err["error"] == "missing_parents"
     # No partial appends
     resp = urllib.request.urlopen(urllib.request.Request(
         url + "/health", headers={"Authorization": "Bearer test-token"}
@@ -210,7 +209,7 @@ def test_pull_empty(test_gate_server):
 
 def test_pull_after_push(test_gate_server, key):
     url, _ = test_gate_server
-    e0 = _make_entry(0, "0" * 64, {"data": "first"}, key)
+    e0 = _make_entry(0, [], {"data": "first"}, key)
     body = json.dumps({"entries": [e0]}).encode()
     urllib.request.urlopen(urllib.request.Request(
         url + "/push", data=body, method="POST",
@@ -227,9 +226,9 @@ def test_pull_after_push(test_gate_server, key):
 
 def test_pull_since_filters(test_gate_server, key):
     url, _ = test_gate_server
-    e0 = _make_entry(0, "0" * 64, {"data": "first"}, key)
-    e1 = _make_entry(1, e0["hash"], {"data": "second"}, key)
-    e2 = _make_entry(2, e1["hash"], {"data": "third"}, key)
+    e0 = _make_entry(0, [], {"data": "first"}, key)
+    e1 = _make_entry(1, [e0["hash"]], {"data": "second"}, key)
+    e2 = _make_entry(2, [e1["hash"]], {"data": "third"}, key)
     body = json.dumps({"entries": [e0, e1, e2]}).encode()
     urllib.request.urlopen(urllib.request.Request(
         url + "/push", data=body, method="POST",
@@ -268,7 +267,7 @@ def test_client_push_then_pull(test_gate_server, tmp_path, key, monkeypatch):
     local_ledger = os.path.join(str(forge_home), "ledger.jsonl")
 
     # Write a genesis entry to the client's local ledger
-    e0 = _make_entry(0, "0" * 64, {"data": "hello"}, key)
+    e0 = _make_entry(0, [], {"data": "hello"}, key)
     with open(local_ledger, "w") as f:
         f.write(json.dumps(e0, separators=(",", ":")) + "\n")
 

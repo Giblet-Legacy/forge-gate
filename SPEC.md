@@ -106,3 +106,35 @@ entries on top of the new head. This is a manual step in v1.0.0
   only enforces chain integrity. P6 on the device is the real
   verifier.
 - No compression, no pagination. Fine at the scale of one operator.
+
+    
+---
+
+## 5. DAG Mode (v2.0.0 Upgrade)
+
+To support multiple devices writing offline and reconciling later, `forge-gate` must support a Directed Acyclic Graph (DAG) rather than a strict linear chain.
+
+### 5.1 The Schema Change
+The `prev` field in a ledger entry changes from a string to a list of strings:
+```json
+{
+  "seq": 15,
+  "prev": ["hash_of_device_A_seq14", "hash_of_device_B_seq14"],
+  "record": { ... },
+  "signer": "did:key:..."
+}
+5.2 The Push Logic
+
+When a client pushes entries to /push, the Gate checks:
+
+1. Are all hashes in the prev array present in the Gate's canonical ledger? (Or is it a genesis entry with prev: []?)
+2. If yes, accept the entry and add it to the ledger.
+3. If no, reject with 409 missing_parents.
+
+5.3 The Pull Logic
+
+The /pull endpoint returns the entire DAG (or a subset based on since). Clients are responsible for sorting out the topology and merging local state.
+
+5.4 Conflict Resolution
+
+The Gate does not resolve conflicts. It only enforces that the graph is acyclic (no entry can point to itself or a future entry). Conflicts (two devices claiming different facts at the same time) are resolved by the master-mediator and hal on the client side.

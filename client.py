@@ -33,7 +33,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..", "store-layer")))
 import envelope_v2 as envelope
 import store
 
-_GENESIS_PREV = "0" * 64
 _STATE_FILE = ".forge-gate-state.json"
 
 
@@ -133,7 +132,7 @@ def _insert_to_store(entries):
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     entry["seq"],
-                    entry["prev"],
+                    json.dumps(entry["prev"], separators=(",", ":")),  # list -> JSON text
                     json.dumps(entry["record"], sort_keys=True, separators=(",", ":")),
                     entry["signer"],
                     entry["hash"],
@@ -283,24 +282,25 @@ def pull():
         print("Already up to date.")
         return 0
 
-    cursor_prev = local[-1]["hash"] if local else _GENESIS_PREV
-    cursor_seq = (local[-1]["seq"] + 1) if local else 0
+    existing_hashes = {e["hash"] for e in local}
 
     verified = []
     for entry in entries:
-        if entry["seq"] != cursor_seq:
-            print(f"ERROR: seq mismatch. Expected {cursor_seq}, got {entry['seq']}", file=sys.stderr)
+        prev = entry.get("prev")
+        if not isinstance(prev, list):
+            print(f"ERROR: entry {entry.get('seq')} prev is not a list", file=sys.stderr)
             return 1
-        if entry["prev"] != cursor_prev:
-            print(f"ERROR: prev mismatch. Expected {cursor_prev}, got {entry['prev']}", file=sys.stderr)
-            return 1
+        if prev:
+            missing = [p for p in prev if p not in existing_hashes]
+            if missing:
+                print(f"ERROR: entry {entry.get('seq')} missing parents: {missing}", file=sys.stderr)
+                return 1
         ok, err = _verify_entry(entry)
         if not ok:
             print(f"ERROR: P6 rejected entry: {err}", file=sys.stderr)
             return 1
         verified.append(entry)
-        cursor_prev = entry["hash"]
-        cursor_seq += 1
+        existing_hashes.add(entry["hash"])
 
     _append_local_ledger(verified)
     _insert_to_store(verified)

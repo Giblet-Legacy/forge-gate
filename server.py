@@ -64,11 +64,17 @@ def _append_entries(entries):
 
 
 def _head(entries):
-    return entries[-1]["hash"] if entries else ""
+    if not entries:
+        return ""
+    # In a DAG, the "head" is the entry with the highest sequence number.
+    # (If there's a tie, it's a real fork; we just return the most recent).
+    return max(entries, key=lambda e: e.get("seq", -1))["hash"]
 
 
 def _expected_seq(entries):
-    return entries[-1]["seq"] + 1 if entries else 0
+    if not entries:
+        return 0
+    return max(e.get("seq", -1) for e in entries) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -150,34 +156,32 @@ class _GateHandler(BaseHTTPRequestHandler):
 
         with _ledger_lock:
             existing = _read_ledger()
-            expected_seq = _expected_seq(existing)
-            expected_prev = _head(existing) or _GENESIS_PREV
+            existing_hashes = {e["hash"] for e in existing}
 
-            # Validate the entire batch against the current chain before committing.
-            cursor_seq = expected_seq
-            cursor_prev = expected_prev
+            # Validate the batch as a DAG, accepting entries that
+            # reference parents also present in this same batch.
             for entry in new_entries:
-                if entry.get("seq") != cursor_seq:
-                    self._json(409, {
-                        "error": "chain_mismatch",
-                        "expected_prev": cursor_prev,
-                        "expected_seq": cursor_seq,
-                    })
+                prev = entry.get("prev")
+                if not isinstance(prev, list):
+                    self._json(400, {"error": "prev_must_be_list"})
                     return
-                if entry.get("prev") != cursor_prev:
-                    self._json(409, {
-                        "error": "chain_mismatch",
-                        "expected_prev": cursor_prev,
-                        "expected_seq": cursor_seq,
-                    })
-                    return
-                cursor_seq += 1
-                cursor_prev = entry.get("hash", "")
+                if not prev:
+                    # Genesis entry; no parents to check.
+                    existing_hashes.add(entry.get("hash", ""))
+                    continue
+                for parent in prev:
+                    if parent not in existing_hashes:
+                        self._json(409, {
+                            "error": "missing_parents",
+                            "missing": parent,
+                        })
+                        return
+                existing_hashes.add(entry.get("hash", ""))
 
             _append_entries(new_entries)
             self._json(200, {
                 "accepted": len(new_entries),
-                "head": cursor_prev,
+                "head": _head(_read_ledger()),
             })
 
     def do_PUT(self):
